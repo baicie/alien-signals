@@ -50,7 +50,8 @@
 		"prepublishOnly": "npm run check && npm run test",
 		"check": "tsslint --project tsconfig.json",
 		"size": "node ./size.js",
-		"build": "node ./build.js",
+		"dev": "rolldown -c rolldown.config.ts -w",
+		"build": "rolldown -c rolldown.config.ts",
 		"test": "npm run build && vitest run",
 		"bench": "npm run build && node --jitless --expose-gc benchs/propagate.mjs",
 		"memory": "npm run build && node --expose-gc benchs/memoryUsage.mjs"
@@ -60,7 +61,8 @@
 		"@tsslint/config": "latest",
 		"jest-extended": "latest",
 		"mitata": "latest",
-		"rolldown": "latest",
+		"rolldown": "1.0.0-rc.16",
+		"rolldown-plugin-dts": "^0.23.2",
 		"typescript": "latest",
 		"vitest": "latest"
 	}
