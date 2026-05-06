@@ -85,6 +85,37 @@ interface SignalNode<T = any> extends ReactiveNode {
 }
 
 // =============================================================================
+// 调试工具
+// =============================================================================
+
+const DEBUG = Symbol("debug");
+const nodeNames = new WeakMap<object, string>();
+let nodeId = 0;
+
+function name(node: object, label: string): string {
+    if (!nodeNames.has(node)) {
+        nodeNames.set(node, `${label}#${++nodeId}`);
+    }
+    return nodeNames.get(node)!;
+}
+
+function flagStr(flags: number): string {
+    const parts: string[] = [];
+    if (flags & 1) parts.push("Mutable");
+    if (flags & 2) parts.push("Watching");
+    if (flags & 4) parts.push("RecursedCheck");
+    if (flags & 8) parts.push("Recursed");
+    if (flags & 16) parts.push("Dirty");
+    if (flags & 32) parts.push("Pending");
+    return parts.length ? `[${parts.join("|")}]` : "[None]";
+}
+
+function log(label: string, ...args: any[]) {
+    const pad = label.padEnd(24, " ");
+    console.log(`\x1b[36m[${pad}]\x1b[0m`, ...args);
+}
+
+// =============================================================================
 // 全局状态
 // =============================================================================
 
@@ -227,29 +258,21 @@ const {
 	 * @param effect - 被触发的 effect
 	 */
 	notify(effect: EffectNode) {
-		let insertIndex = queuedLength;    // 插入位置
-		let firstInsertedIndex = insertIndex; // 记录本次插入的起始位置
+		let insertIndex = queuedLength;
+		let firstInsertedIndex = insertIndex;
+		log("notify         ", name(effect, "effect"), "queued at index", insertIndex, "flags =", flagStr(effect.flags));
 
-		// 沿着订阅链向上遍历
 		do {
-			// 将 effect 加入队列
 			queued[insertIndex++] = effect;
-			// 清除 Watching 标志，防止重复通知
 			effect.flags &= ~ReactiveFlags.Watching;
-			// 获取当前 effect 的订阅者（外部 effect）
 			effect = effect.subs?.sub as EffectNode;
-			// 如果没有外部 effect 或外部 effect 不在监听，停止
 			if (effect === undefined || !(effect.flags & ReactiveFlags.Watching)) {
 				break;
 			}
 		} while (true);
 
-		// 更新队列长度
 		queuedLength = insertIndex;
 
-		// 反转本次插入的 effect 顺序
-		// 目的：让内层 effect 先执行，外层 effect 后执行
-		// 例如：如果插入顺序是 [inner, outer]，反转后变为 [outer, inner]
 		while (firstInsertedIndex < --insertIndex) {
 			const left = queued[firstInsertedIndex];
 			queued[firstInsertedIndex++] = queued[insertIndex];
@@ -451,14 +474,15 @@ export function signal<T>(initialValue?: T): {
 	(): T | undefined;
 	(value: T | undefined): void;
 } {
-	return signalOper.bind({
+	const node = {
 		currentValue: initialValue,
 		pendingValue: initialValue,
 		subs: undefined,
 		subsTail: undefined,
-		// signal 是可变的
 		flags: ReactiveFlags.Mutable,
-	}) as () => T | undefined;
+	};
+	log("signal.create  ", name(node, "signal"), "initialValue =", initialValue, "flags =", flagStr(node.flags));
+	return signalOper.bind(node) as () => T | undefined;
 }
 
 // =============================================================================
@@ -489,7 +513,7 @@ export function signal<T>(initialValue?: T): {
  * - 只在读取时检查是否需要重新计算
  */
 export function computed<T>(getter: (previousValue?: T) => T): () => T {
-	return computedOper.bind({
+	const node = {
 		value: undefined,
 		subs: undefined,
 		subsTail: undefined,
@@ -498,7 +522,9 @@ export function computed<T>(getter: (previousValue?: T) => T): () => T {
 		// computed 默认状态
 		flags: ReactiveFlags.None,
 		getter: getter as (previousValue?: unknown) => unknown,
-	}) as () => T;
+	};
+	log("computed.create ", name(node, "computed"), "flags =", flagStr(node.flags));
+	return computedOper.bind(node) as () => T;
 }
 
 // =============================================================================
@@ -540,30 +566,24 @@ export function effect(fn: () => void): () => void {
 		subsTail: undefined,
 		deps: undefined,
 		depsTail: undefined,
-		// Watching: 需要通知
-		// RecursedCheck: 需要检测循环依赖
 		flags: ReactiveFlags.Watching | ReactiveFlags.RecursedCheck,
 	};
+	log("effect.create  ", name(e, "effect"), "flags =", flagStr(e.flags));
 
-	// 保存当前 activeSub，设置新的
 	const prevSub = setActiveSub(e);
-
-	// 如果有上层 effect/activeSub，建立链接
 	if (prevSub !== undefined) {
 		link(e, prevSub, 0);
 	}
 
 	try {
-		// 执行用户函数，同时自动收集依赖
+		log("effect.create  ", name(e, "effect"), "executing fn()...");
 		e.fn();
+		log("effect.create  ", name(e, "effect"), "fn() done, deps collected");
 	} finally {
-		// 恢复之前的 activeSub
 		activeSub = prevSub;
-		// 清除递归检查标志
 		e.flags &= ~ReactiveFlags.RecursedCheck;
 	}
 
-	// 返回绑定了 effectOper 的停止函数
 	return effectOper.bind(e);
 }
 
@@ -713,20 +733,23 @@ export function trigger(fn: () => void) {
  * @returns - true 表示值变了
  */
 function updateComputed(c: ComputedNode): boolean {
-	++cycle;  // 版本递增
-	c.depsTail = undefined;  // 清空依赖，准备重新收集
-	c.flags = ReactiveFlags.Mutable | ReactiveFlags.RecursedCheck;  // 设置状态
+	++cycle;
+	c.depsTail = undefined;
+	c.flags = ReactiveFlags.Mutable | ReactiveFlags.RecursedCheck;
 
-	const prevSub = setActiveSub(c);  // 将 computed 设为活跃订阅者
+	const prevSub = setActiveSub(c);
 	try {
 		const oldValue = c.value;
-		// 执行 getter，用旧值作为参数（如果 getter 支持的话）
-		// 比较新旧值是否相同
-		return oldValue !== (c.value = c.getter(oldValue));
+		log("computed.update ", name(c, "computed"), "oldValue =", oldValue);
+		const newValue = c.getter(oldValue);
+		const changed = oldValue !== newValue;
+		c.value = newValue;
+		log("computed.update ", name(c, "computed"), "newValue =", newValue, changed ? "CHANGED" : "unchanged");
+		return changed;
 	} finally {
-		activeSub = prevSub;  // 恢复
-		c.flags &= ~ReactiveFlags.RecursedCheck;  // 清除递归检查
-		purgeDeps(c);  // 清理不再需要的依赖
+		activeSub = prevSub;
+		c.flags &= ~ReactiveFlags.RecursedCheck;
+		purgeDeps(c);
 	}
 }
 
@@ -745,7 +768,9 @@ function updateComputed(c: ComputedNode): boolean {
  */
 function updateSignal(s: SignalNode): boolean {
 	s.flags = ReactiveFlags.Mutable;
-	return s.currentValue !== (s.currentValue = s.pendingValue);
+	const changed = s.currentValue !== (s.currentValue = s.pendingValue);
+	log("signal.update  ", name(s, "signal"), "current:", changed ? `(${s.currentValue} changed)` : `(${s.currentValue} unchanged)`);
+	return changed;
 }
 
 // =============================================================================
@@ -771,12 +796,11 @@ function updateSignal(s: SignalNode): boolean {
 function run(e: EffectNode): void {
 	const flags = e.flags;
 
-	// 判断是否需要运行
 	if (
-		flags & ReactiveFlags.Dirty  // 已经是脏的
+		flags & ReactiveFlags.Dirty
 		|| (
-			flags & ReactiveFlags.Pending  // 等待中
-			&& checkDirty(e.deps!, e)  // 且确实脏了
+			flags & ReactiveFlags.Pending
+			&& checkDirty(e.deps!, e)
 		)
 	) {
 		++cycle;
@@ -784,16 +808,16 @@ function run(e: EffectNode): void {
 		e.flags = ReactiveFlags.Watching | ReactiveFlags.RecursedCheck;
 
 		const prevSub = setActiveSub(e);
+		log("effect.run     ", name(e, "effect"), "START");
 		try {
-			// 执行用户函数
 			(e as EffectNode).fn();
 		} finally {
 			activeSub = prevSub;
 			e.flags &= ~ReactiveFlags.RecursedCheck;
 			purgeDeps(e);
+			log("effect.run     ", name(e, "effect"), "DONE");
 		}
 	} else {
-		// 不脏，只设置 Watching
 		e.flags = ReactiveFlags.Watching;
 	}
 }
@@ -822,24 +846,23 @@ function run(e: EffectNode): void {
  * - finally 确保这些新 effect 也能被处理
  */
 function flush(): void {
+	log("flush          ", "========== FLUSH START ==========");
 	try {
-		// 第一阶段：处理现有队列
-		while (notifyIndex < queuedLength) {
-			const effect = queued[notifyIndex]!;
-			queued[notifyIndex++] = undefined;  // 设为 undefined
-			run(effect);
-		}
-	} finally {
-		// 第二阶段：处理新加入的 effect
 		while (notifyIndex < queuedLength) {
 			const effect = queued[notifyIndex]!;
 			queued[notifyIndex++] = undefined;
-			// 设置 Watch 和 Recursed 标志
+			log("flush          ", "running effect at index", notifyIndex - 1);
+			run(effect);
+		}
+	} finally {
+		while (notifyIndex < queuedLength) {
+			const effect = queued[notifyIndex]!;
+			queued[notifyIndex++] = undefined;
 			effect.flags |= ReactiveFlags.Watching | ReactiveFlags.Recursed;
 		}
-		// 重置队列状态
 		notifyIndex = 0;
 		queuedLength = 0;
+		log("flush          ", "========== FLUSH END ==========");
 	}
 }
 
@@ -932,17 +955,15 @@ function computedOper<T>(this: ComputedNode<T>): T {
 function signalOper<T>(this: SignalNode<T>, ...value: [T]): T | void {
 	if (value.length) {
 		// ========== 设置值 ==========
+		log("signal.write   ", name(this, "signal"), "pending:", this.pendingValue, "=>", value[0]);
 
-		// 检查值是否真的变了
 		if (this.pendingValue !== (this.pendingValue = value[0])) {
-			// 值变了
 			this.flags = ReactiveFlags.Mutable | ReactiveFlags.Dirty;
+			log("signal.changed ", name(this, "signal"), "flags =", flagStr(this.flags));
 
 			const subs = this.subs;
 			if (subs !== undefined) {
-				// 有订阅者，触发推送
 				propagate(subs);
-				// 不在批量模式，立即 flush
 				if (!batchDepth) {
 					flush();
 				}
@@ -950,11 +971,8 @@ function signalOper<T>(this: SignalNode<T>, ...value: [T]): T | void {
 		}
 	} else {
 		// ========== 读取值 ==========
-
-		// 如果当前是脏的，先更新值
 		if (this.flags & ReactiveFlags.Dirty) {
 			if (updateSignal(this)) {
-				// 值变了，通知下游
 				const subs = this.subs;
 				if (subs !== undefined) {
 					shallowPropagate(subs);
@@ -962,20 +980,17 @@ function signalOper<T>(this: SignalNode<T>, ...value: [T]): T | void {
 			}
 		}
 
-		// 建立依赖关系
 		let sub = activeSub;
 		while (sub !== undefined) {
-			// 找到可以建立依赖的订阅者
-			// 条件：订阅者要么是可变的（signal/effectScope），要么是正在监听的（effect）
 			if (sub.flags & (ReactiveFlags.Mutable | ReactiveFlags.Watching)) {
 				link(this, sub, cycle);
+				log("signal.link    ", name(this, "signal"), "=>", name(sub, sub.flags & ReactiveFlags.Mutable ? "signal" : "effect"));
 				break;
 			}
-			// 如果当前订阅者不能建立依赖，尝试它的父订阅者
-			// sub.subs?.sub 指向订阅者的外部订阅者
 			sub = sub.subs?.sub;
 		}
 
+		log("signal.read    ", name(this, "signal"), "=>", this.currentValue);
 		return this.currentValue;
 	}
 }
