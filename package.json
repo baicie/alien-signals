@@ -54,7 +54,8 @@
 		"build": "rolldown -c rolldown.config.ts",
 		"test": "npm run build && vitest run",
 		"bench": "npm run build && node --jitless --expose-gc benchs/propagate.mjs",
-		"memory": "npm run build && node --expose-gc benchs/memoryUsage.mjs"
+		"memory": "npm run build && node --expose-gc benchs/memoryUsage.mjs",
+		"start": "node index.js"
 	},
 	"devDependencies": {
 		"@tsslint/cli": "latest",
